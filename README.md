@@ -1,57 +1,56 @@
-# Como funciona hoje (local):
+# Monitor Processual
 
-# Monitor de Andamentos Processuais
+Aplicação multiusuário para importar processos, consultar diariamente a API Pública DataJud e notificar novos andamentos pelo Telegram.
 
-Consulta diariamente a API Pública do DataJud (CNJ), atualiza a planilha
-`processos.xlsx` e notifica o advogado no Telegram quando há novo andamento.
+## Arquitetura
 
-## Setup 
+- **Vercel / Next.js:** interface, autenticação por e-mail/senha, importação, exportação e webhook Telegram.
+- **Prisma ORM:** única camada de acesso a dados da aplicação.
+- **Supabase:** hospedagem do PostgreSQL, sem uso de Auth, SDK ou RLS do Supabase.
+- **Render Cron:** worker Node (`pnpm worker:sync`) que consulta a DataJud diariamente.
 
-1. **Instalar dependências**
-   ```bash
-   pnpm install   # ou npm install
-   ```
+## Banco de dados
 
-2. **Chave do DataJud**
-   A chave pública vigente fica na wiki oficial do CNJ:
-   https://datajud-wiki.cnj.jus.br/api-publica/acesso/
+1. Crie um projeto Supabase e obtenha as duas connection strings em **Connect**.
+2. Preencha `.env.local` a partir de `.env.example`:
+   - `DATABASE_URL`: conexão pooler do Supabase, com `pgbouncer=true`, para a aplicação e worker.
+   - `DIRECT_URL`: conexão direta `db.<project-ref>.supabase.co:5432`, usada exclusivamente por migrations.
+   - `AUTH_SECRET`: valor aleatório com pelo menos 32 caracteres para assinar cookies de sessão.
+3. Aplique a estrutura com `pnpm prisma:deploy`. Em desenvolvimento, use `pnpm prisma:migrate --name descricao_da_mudanca`.
 
-3. **Bot do Telegram**
-   - Fale com o `@BotFather` no Telegram → `/newbot` → copie o token.
-   - Adicione o bot ao grupo do escritório (ou inicie conversa direta).
-   - Envie qualquer mensagem e acesse
-     `https://api.telegram.org/bot<TOKEN>/getUpdates` para descobrir o `chat_id`.
+As migrations ficam em `prisma/migrations` e o schema em `prisma/schema.prisma`. O Prisma gerencia as tabelas `users`, `processes`, histórico, importações, vínculos Telegram e execuções do worker.
 
-4. **Configurar `.env`**
-   ```bash
-   cp .env.example .env
-   # edite com sua chave, token e chat_id
-   ```
+## Desenvolvimento local
 
-5. **Preencher a planilha**
-   Abra `processos.xlsx` e preencha as colunas amarelas (A–D).
-   O campo *Tribunal* usa o alias do DataJud: `tjsp`, `tjrj`, `trf3`, `trt2`, `tst`, etc.
-   Lista completa: https://datajud-wiki.cnj.jus.br/api-publica/endpoints/
+1. Configure `DATABASE_URL`, `DIRECT_URL` e `AUTH_SECRET` em `.env.local`. Para rodar o worker local, repita as variáveis privadas em `.env`.
+2. Instale dependências: `pnpm install`. A instalação gera o cliente Prisma.
+3. Execute `pnpm prisma:deploy`.
+4. Inicie a interface: `pnpm dev`.
 
-6. **Rodar manualmente**
-   ```bash
-   pnpm start
-   ```
+## Telegram
 
-## Agendamento diário
+1. Crie um bot uma vez no `@BotFather` e defina `TELEGRAM_BOT_TOKEN` e `TELEGRAM_BOT_USERNAME`.
+2. Gere um segredo forte para `TELEGRAM_WEBHOOK_SECRET`.
+3. Após publicar, registre o webhook:
 
-**Linux (cron)** — todo dia às 8h:
-```
-0 8 * * 1-5 cd /caminho/monitor-processos && /usr/bin/pnpm start >> log.txt 2>&1
+```bash
+curl -F "url=https://SEU_DOMINIO/api/telegram/webhook" \
+  -F "secret_token=$TELEGRAM_WEBHOOK_SECRET" \
+  "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/setWebhook"
 ```
 
-**Windows (Agendador de Tarefas):** crie uma tarefa diária executando
-`pnpm start` no diretório do projeto (feche o Excel antes — arquivo aberto
-bloqueia a escrita).
+O usuário abre o link gerado no painel; o token é de uso único e expira em 15 minutos. O bot compartilha apenas o chat vinculado àquela conta.
 
-## Observações
+## Worker Render
 
-- O DataJud **não é tempo real**: a defasagem varia de horas a dias conforme
-  o tribunal. Para prazos fatais, combine com o acompanhamento do DJE.
-- Processos sob segredo de justiça não aparecem na API.
-- O script aguarda 1,5s entre consultas para respeitar o rate limit da API.
+Crie um **Cron Job** no Render com o comando `pnpm worker:sync`, agendado em dias úteis. Defina `DATABASE_URL`, `DIRECT_URL`, `AUTH_SECRET`, `DATAJUD_API_KEY`, `TELEGRAM_BOT_TOKEN` e `WORKER_DELAY_MS`. O worker mantém 1,5 s entre consultas por padrão.
+
+O primeiro sucesso para cada processo grava a linha de base sem alerta. A partir da próxima movimentação, grava todos os novos eventos retornados pela API e envia Telegram se houver chat conectado.
+
+## Segurança
+
+- `DATABASE_URL`, `DIRECT_URL`, `AUTH_SECRET`, DataJud e Telegram são somente variáveis de servidor.
+- Senhas usam hash bcrypt; a sessão fica em cookie `HttpOnly`, `Secure` em produção e com expiração de sete dias.
+- Toda consulta de aplicação filtra pelo `userId` da sessão. O worker é o único componente que percorre a carteira completa.
+- Planilhas são analisadas em memória e não são armazenadas após a importação.
+- O endpoint Telegram rejeita requisições sem o cabeçalho secreto enviado pelo Telegram.

@@ -11,4 +11,4 @@ leia o arquivo agents.md para ficar por dentro do contexto do script/projeto e p
 - design objetivo e clean
 - usar componentes do shadcn
 - modelagem de arquitetura com foco em Security-First
-- banco supabase
+- banco: prisma orm com postgres e supabase apenas para hospedagem do banco

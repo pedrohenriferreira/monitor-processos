@@ -1,0 +1,129 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+enum ProcessStatus {
+  PENDING
+  OK
+  NEW_EVENT
+  NOT_FOUND
+  ERROR
+}
+
+enum ImportStatus {
+  PREVIEW
+  COMPLETED
+  FAILED
+}
+
+model User {
+  id              String               @id @default(uuid()) @db.Uuid
+  email           String               @unique
+  fullName        String?              @map("full_name")
+  passwordHash    String               @map("password_hash")
+  sessionVersion  Int                  @default(0) @map("session_version")
+  planLabel       String               @default("Pro — Ilimitado") @map("plan_label")
+  createdAt       DateTime             @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime             @updatedAt @map("updated_at") @db.Timestamptz(6)
+  imports         Import[]
+  processes       Process[]
+  events          ProcessEvent[]
+  telegram        TelegramConnection?
+  @@map("users")
+}
+
+model Import {
+  id           String       @id @default(uuid()) @db.Uuid
+  userId       String       @map("user_id") @db.Uuid
+  filename     String
+  totalRows    Int          @default(0) @map("total_rows")
+  importedRows Int          @default(0) @map("imported_rows")
+  rejectedRows Int          @default(0) @map("rejected_rows")
+  status       ImportStatus @default(PREVIEW)
+  createdAt    DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  processes    Process[]
+  @@index([userId, createdAt])
+  @@map("imports")
+}
+
+model Process {
+  id                     String        @id @default(uuid()) @db.Uuid
+  userId                 String        @map("user_id") @db.Uuid
+  importId               String?       @map("import_id") @db.Uuid
+  numeroCnj              String        @map("numero_cnj")
+  tribunal               String
+  advogado               String?
+  classe                 String?
+  parteAdversa           String?       @map("parte_adversa")
+  valorCausa             Decimal?      @map("valor_causa") @db.Decimal(14, 2)
+  proximaAudiencia       DateTime?     @map("proxima_audiencia") @db.Timestamptz(6)
+  audienciaAlertadaPara  DateTime?     @map("audiencia_alertada_para") @db.Timestamptz(6)
+  lastEventName          String?       @map("last_event_name")
+  lastEventCode          Int?          @map("last_event_code")
+  lastEventAt            DateTime?     @map("last_event_at") @db.Timestamptz(6)
+  lastCheckedAt          DateTime?     @map("last_checked_at") @db.Timestamptz(6)
+  status                 ProcessStatus @default(PENDING)
+  lastError              String?       @map("last_error")
+  isActive               Boolean       @default(true) @map("is_active")
+  createdAt              DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt              DateTime      @updatedAt @map("updated_at") @db.Timestamptz(6)
+  user                   User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  import                 Import?       @relation(fields: [importId], references: [id], onDelete: SetNull)
+  events                 ProcessEvent[]
+  @@unique([userId, numeroCnj, tribunal])
+  @@index([isActive, updatedAt])
+  @@map("processes")
+}
+
+model ProcessEvent {
+  id              String    @id @default(uuid()) @db.Uuid
+  processId       String    @map("process_id") @db.Uuid
+  userId          String    @map("user_id") @db.Uuid
+  code            Int?
+  name            String
+  happenedAt      DateTime  @map("happened_at") @db.Timestamptz(6)
+  metadata        Json      @default("{}")
+  notifiedAt      DateTime? @map("notified_at") @db.Timestamptz(6)
+  prazoNotifiedAt DateTime? @map("prazo_notified_at") @db.Timestamptz(6)
+  createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  process         Process   @relation(fields: [processId], references: [id], onDelete: Cascade)
+  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  @@unique([processId, happenedAt, name])
+  @@index([processId, happenedAt])
+  @@map("process_events")
+}
+
+model TelegramConnection {
+  id                    String    @id @default(uuid()) @db.Uuid
+  userId                String    @unique @map("user_id") @db.Uuid
+  chatId                String?   @unique @map("chat_id")
+  linkTokenHash         String?   @map("link_token_hash")
+  linkTokenExpiresAt    DateTime? @map("link_token_expires_at") @db.Timestamptz(6)
+  connectedAt           DateTime? @map("connected_at") @db.Timestamptz(6)
+  notifyNovoAndamento   Boolean   @default(true) @map("notify_novo_andamento")
+  notifyPrazo           Boolean   @default(false) @map("notify_prazo")
+  notifyAudiencia       Boolean   @default(false) @map("notify_audiencia")
+  createdAt             DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt             DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+  user                  User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  @@map("telegram_connections")
+}
+
+model WorkerRun {
+  id             String    @id @default(uuid()) @db.Uuid
+  startedAt      DateTime  @default(now()) @map("started_at") @db.Timestamptz(6)
+  finishedAt     DateTime? @map("finished_at") @db.Timestamptz(6)
+  totalProcesses Int       @default(0) @map("total_processes")
+  newEvents      Int       @default(0) @map("new_events")
+  errors         Int       @default(0)
+  status         String    @default("RUNNING")
+  details        String?
+  @@map("worker_runs")
+}

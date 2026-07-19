@@ -1,0 +1,6 @@
+import * as XLSX from "xlsx";
+import { NextResponse } from "next/server";
+import { getCurrentUser } from "@/lib/auth";
+import { detectMapping } from "@/lib/processes";
+export const runtime = "nodejs";
+export async function POST(request: Request) { if (!await getCurrentUser()) return NextResponse.json({ error: "Não autorizado." }, { status: 401 }); const form = await request.formData(); const file = form.get("file"); if (!(file instanceof File) || !file.name.toLowerCase().endsWith(".xlsx") || file.size > 5_000_000) return NextResponse.json({ error: "Envie um arquivo .xlsx de até 5 MB." }, { status: 400 }); try { const workbook = XLSX.read(await file.arrayBuffer(), { type: "array", cellDates: false }); const worksheet = workbook.Sheets[workbook.SheetNames[0]]; if (!worksheet) throw new Error("Planilha vazia."); const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(worksheet, { defval: "", raw: false }); if (!rows.length || rows.length > 2000) throw new Error("A planilha deve conter entre 1 e 2.000 linhas."); const headers = Object.keys(rows[0]); return NextResponse.json({ headers, mapping: detectMapping(headers), rows, filename: file.name }); } catch (error) { return NextResponse.json({ error: error instanceof Error ? error.message : "Arquivo inválido." }, { status: 400 }); } }
