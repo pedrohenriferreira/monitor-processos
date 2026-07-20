@@ -90,10 +90,17 @@ export function detectMapping(headers: string[]): Partial<ColumnMapping> {
   };
 }
 
+function isBlankRow(row: Record<string, unknown>) {
+  return Object.values(row).every((value) => String(value ?? "").trim() === "");
+}
+
 export function validateRows(rows: Record<string, unknown>[], mapping: ColumnMapping) {
   const valid: ImportRow[] = [];
   const rejected: { rowNumber: number; reason: string }[] = [];
   rows.forEach((row, index) => {
+    // Linha completamente em branco (comum no fim de planilhas exportadas de outros sistemas) —
+    // ignora silenciosamente, não é um processo nem um erro.
+    if (isBlankRow(row)) return;
     const numeroCnj = normalizeCnj(row[mapping.numeroCnj]);
     const tribunal = normalizeTribunal(row[mapping.tribunal]);
     if (!numeroCnj || !tribunal) {

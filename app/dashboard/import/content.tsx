@@ -1,7 +1,8 @@
 "use client";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { CheckCircle2, FileSpreadsheet, LoaderCircle, UploadCloud } from "lucide-react";
+import { AlertTriangle, CheckCircle2, FileSpreadsheet, LoaderCircle, UploadCloud } from "lucide-react";
+import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 
 type FieldKey = "numeroCnj" | "tribunal" | "advogado" | "classe" | "parteAdversa" | "valorCausa" | "proximaAudiencia";
@@ -16,7 +17,29 @@ const FIELDS: { key: FieldKey; label: string; required?: boolean }[] = [
   { key: "proximaAudiencia", label: "Próxima Audiência" },
 ];
 
-type Preview = { headers: string[]; mapping: Partial<Record<FieldKey, string>>; rows: Record<string, unknown>[]; filename: string };
+const POLL_INTERVAL_MS = 1000;
+const MAX_REJECTED_SHOWN = 50;
+
+type Preview = {
+  importId: string;
+  headers: string[];
+  mapping: Partial<Record<FieldKey, string>>;
+  rowsSample: Record<string, unknown>[];
+  totalRows: number;
+  filename: string;
+};
+
+type RejectedDetail = { rowNumber: number; reason: string };
+
+type Progress = {
+  status: "PROCESSING" | "COMPLETED" | "FAILED";
+  totalRows: number;
+  processedRows: number;
+  importedRows: number;
+  rejectedRows: number;
+  rejectedDetails: RejectedDetail[] | null;
+  errorMessage: string | null;
+};
 
 export default function Content() {
   const router = useRouter();
@@ -26,34 +49,84 @@ export default function Content() {
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const [dragOver, setDragOver] = useState(false);
-  const [done, setDone] = useState<{ imported: number } | null>(null);
+  const [importId, setImportId] = useState<string>();
+  const [progress, setProgress] = useState<Progress>();
+
+  // Enquanto a importação estiver em processamento, consulta o status a cada segundo
+  // para atualizar a barra de progresso — mesmo padrão de polling usado na conexão do Telegram.
+  useEffect(() => {
+    if (!importId || progress?.status !== "PROCESSING") return;
+    const interval = setInterval(async () => {
+      try {
+        const response = await fetch(`/api/import/${importId}`);
+        if (!response.ok) return;
+        setProgress(await response.json());
+      } catch {
+        // instabilidade de rede pontual — tenta de novo no próximo tick
+      }
+    }, POLL_INTERVAL_MS);
+    return () => clearInterval(interval);
+  }, [importId, progress?.status]);
 
   async function previewFile(file: File) {
     setLoading(true);
     setError("");
-    const body = new FormData();
-    body.set("file", file);
-    const response = await fetch("/api/import/preview", { method: "POST", body });
-    const data = await response.json();
-    setLoading(false);
-    if (!response.ok) return setError(data.error ?? "Não foi possível ler a planilha.");
-    setPreview(data);
-    setEditing(new Set());
+    try {
+      const body = new FormData();
+      body.set("file", file);
+      const response = await fetch("/api/import/preview", { method: "POST", body });
+      const data = await response.json();
+      if (!response.ok) {
+        setError(data.error ?? "Não foi possível ler a planilha.");
+        return;
+      }
+      setPreview(data);
+      setEditing(new Set());
+    } catch {
+      toast.error("Não foi possível conectar ao servidor. Tente novamente.");
+    } finally {
+      setLoading(false);
+    }
   }
 
   async function confirm() {
     if (!preview) return;
     setLoading(true);
-    const response = await fetch("/api/import/confirm", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(preview),
-    });
-    const data = await response.json();
-    setLoading(false);
-    if (!response.ok) return setError(data.error ?? "Importação não concluída.");
-    setDone({ imported: data.imported });
+    setError("");
+    try {
+      const response = await fetch("/api/import/confirm", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ importId: preview.importId, mapping: preview.mapping }),
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        setError(data.error ?? "Importação não concluída.");
+        return;
+      }
+      setImportId(data.importId);
+      setProgress({
+        status: "PROCESSING",
+        totalRows: preview.totalRows,
+        processedRows: 0,
+        importedRows: data.importedRows,
+        rejectedRows: data.rejectedRows,
+        rejectedDetails: null,
+        errorMessage: null,
+      });
+      setPreview(undefined);
+    } catch {
+      toast.error("Não foi possível conectar ao servidor. Tente novamente.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  function resetImport() {
     setPreview(undefined);
+    setImportId(undefined);
+    setProgress(undefined);
+    setError("");
   }
 
   function updateMapping(field: FieldKey, value: string) {
@@ -70,15 +143,75 @@ export default function Content() {
     });
   }
 
-  if (done) {
-    return (
-      <div className="mx-auto max-w-[420px] py-10 text-center">
-        <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-full bg-green-50 text-green-700">
-          <CheckCircle2 size={28} />
+  if (progress) {
+    // O denominador é importedRows (quantas linhas realmente entram na escrita), não totalRows —
+    // linhas rejeitadas na validação nunca chegam a ser processadas, então usar totalRows faria a
+    // barra travar antes de 100% sempre que houver alguma linha rejeitada.
+    const toProcess = progress.importedRows;
+    const percent = toProcess ? Math.min(100, Math.round((progress.processedRows / toProcess) * 100)) : 100;
+
+    if (progress.status === "PROCESSING") {
+      return (
+        <div className="mx-auto max-w-[420px] py-14 text-center">
+          <LoaderCircle className="mx-auto animate-spin text-accent" size={28} />
+          <h2 className="mb-1.5 mt-4 text-lg font-semibold">Importando processos...</h2>
+          <p className="mb-5 text-[13.5px] text-zinc-500">
+            {progress.processedRows} de {toProcess} processados
+          </p>
+          <div className="mx-auto h-2 w-full overflow-hidden rounded-full bg-zinc-100">
+            <div className="h-full rounded-full bg-accent transition-all duration-300" style={{ width: `${percent}%` }} />
+          </div>
         </div>
-        <h2 className="mb-1.5 mt-4 text-lg font-semibold">Importação concluída!</h2>
-        <p className="mb-5 text-[13.5px] text-zinc-500">{done.imported} processos foram adicionados e já estão sendo monitorados.</p>
-        <Button onClick={() => router.push("/dashboard")}>Ver processos</Button>
+      );
+    }
+
+    const rejectedList = progress.rejectedDetails ?? [];
+    return (
+      <div className="mx-auto max-w-[560px] py-10 text-center">
+        {progress.status === "COMPLETED" ? (
+          <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-full bg-green-50 text-green-700">
+            <CheckCircle2 size={28} />
+          </div>
+        ) : (
+          <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-full bg-red-50 text-red-700">
+            <AlertTriangle size={28} />
+          </div>
+        )}
+        <h2 className="mb-1.5 mt-4 text-lg font-semibold">
+          {progress.status === "COMPLETED" ? "Importação concluída!" : "A importação parou no meio"}
+        </h2>
+        <p className="mb-5 text-[13.5px] text-zinc-500">
+          {progress.status === "COMPLETED"
+            ? `${progress.importedRows} de ${progress.totalRows} processos foram adicionados e já estão sendo monitorados.`
+            : `${progress.processedRows} de ${progress.totalRows} processos chegaram a ser salvos antes da falha. ${progress.errorMessage ?? "Tente novamente em instantes."}`}
+        </p>
+
+        {rejectedList.length > 0 && (
+          <div className="mb-5 rounded-xl border border-amber-200 bg-amber-50 p-4 text-left text-[13px]">
+            <div className="mb-2 font-semibold text-amber-800">
+              {rejectedList.length} {rejectedList.length === 1 ? "linha não foi importada" : "linhas não foram importadas"}
+            </div>
+            <ul className="max-h-48 space-y-1 overflow-auto text-amber-700">
+              {rejectedList.slice(0, MAX_REJECTED_SHOWN).map((item) => (
+                <li key={item.rowNumber}>
+                  Linha {item.rowNumber}: {item.reason}
+                </li>
+              ))}
+            </ul>
+            {rejectedList.length > MAX_REJECTED_SHOWN && (
+              <div className="mt-2 text-amber-600">+{rejectedList.length - MAX_REJECTED_SHOWN} outras linhas</div>
+            )}
+          </div>
+        )}
+
+        <div className="flex justify-center gap-2.5">
+          {progress.status === "FAILED" && (
+            <Button variant="outline" onClick={resetImport}>
+              Tentar novamente
+            </Button>
+          )}
+          <Button onClick={() => router.push("/dashboard")}>Ver processos</Button>
+        </div>
       </div>
     );
   }
@@ -138,7 +271,7 @@ export default function Content() {
           <FileSpreadsheet size={20} className="text-zinc-400" />
           <div>
             <div className="text-sm font-semibold">{preview.filename}</div>
-            <div className="mt-0.5 text-[12.5px] text-zinc-500">{preview.rows.length} processos detectados</div>
+            <div className="mt-0.5 text-[12.5px] text-zinc-500">{preview.totalRows} processos detectados</div>
           </div>
         </div>
         <span className="rounded-full border border-green-200 bg-green-50 px-2.5 py-1 text-xs font-semibold text-green-700">
@@ -197,7 +330,7 @@ export default function Content() {
             </tr>
           </thead>
           <tbody>
-            {preview.rows.slice(0, 5).map((row, index) => (
+            {preview.rowsSample.slice(0, 5).map((row, index) => (
               <tr key={index} className="border-b border-zinc-100 last:border-0">
                 {preview.headers.slice(0, 5).map((header) => (
                   <td key={header} className="max-w-48 truncate px-3 py-2">{String(row[header] ?? "")}</td>

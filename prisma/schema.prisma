@@ -18,6 +18,7 @@ enum ProcessStatus {
 
 enum ImportStatus {
   PREVIEW
+  PROCESSING
   COMPLETED
   FAILED
 }
@@ -39,16 +40,20 @@ model User {
 }
 
 model Import {
-  id           String       @id @default(uuid()) @db.Uuid
-  userId       String       @map("user_id") @db.Uuid
-  filename     String
-  totalRows    Int          @default(0) @map("total_rows")
-  importedRows Int          @default(0) @map("imported_rows")
-  rejectedRows Int          @default(0) @map("rejected_rows")
-  status       ImportStatus @default(PREVIEW)
-  createdAt    DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
-  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
-  processes    Process[]
+  id              String       @id @default(uuid()) @db.Uuid
+  userId          String       @map("user_id") @db.Uuid
+  filename        String
+  totalRows       Int          @default(0) @map("total_rows")
+  processedRows   Int          @default(0) @map("processed_rows")
+  importedRows    Int          @default(0) @map("imported_rows")
+  rejectedRows    Int          @default(0) @map("rejected_rows")
+  status          ImportStatus @default(PREVIEW)
+  rawRows         Json?        @map("raw_rows")
+  rejectedDetails Json?        @map("rejected_details")
+  errorMessage    String?      @map("error_message")
+  createdAt       DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
+  user            User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  processes       Process[]
   @@index([userId, createdAt])
   @@map("imports")
 }

@@ -170,7 +170,7 @@ Comportamento:
 - `DATABASE_URL`, `DIRECT_URL`, `AUTH_SECRET`, DataJud e Telegram são somente variáveis de servidor — nunca expostas ao cliente.
 - Senhas usam hash bcrypt; a sessão fica em cookie `HttpOnly`, `Secure` em produção, com expiração de sete dias.
 - Toda consulta da aplicação filtra pelo `userId` da sessão. O worker é o único componente que percorre a carteira completa.
-- Planilhas são analisadas em memória e não são armazenadas após a importação.
+- O arquivo `.xlsx` em si nunca é salvo em disco. Os dados extraídos ficam retidos no banco apenas durante a etapa de confirmação (enquanto a importação está em `PREVIEW`/`PROCESSING`) e são descartados assim que o processamento termina.
 - O endpoint do webhook Telegram rejeita requisições sem o cabeçalho secreto configurado (`x-telegram-bot-api-secret-token`).
 
 ## Scripts disponíveis
