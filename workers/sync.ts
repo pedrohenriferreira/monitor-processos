@@ -6,6 +6,10 @@ import { movementMessage, prazoMessage, sendTelegramMessage } from "../lib/teleg
 const delay = Number(process.env.WORKER_DELAY_MS ?? 1500);
 const wait = () => new Promise((resolve) => setTimeout(resolve, delay));
 
+// Acima do tempo que qualquer execução real deveria levar hoje — só existe pra destravar
+// um WorkerRun órfão (container derrubado no meio) sem bloquear execuções futuras para sempre.
+const STALE_RUN_THRESHOLD_MS = 2 * 60 * 60 * 1000;
+
 // Bounded heuristic: DataJud exposes no structured deadline field, only free-text
 // movement names. This is a best-effort keyword guess, not real deadline tracking —
 // results vary by tribunal wording and may miss or over-flag movements.
@@ -16,37 +20,61 @@ function matchesPrazoKeyword(nome: string) {
 }
 
 async function main() {
+  // Roda a cada hora agora — evita duas execuções em cima uma da outra se a anterior ainda
+  // estiver em andamento (carteira grande, instabilidade da API, etc).
+  const unfinished = await db.workerRun.findFirst({ where: { finishedAt: null }, orderBy: { startedAt: "desc" } });
+  if (unfinished) {
+    const ageMs = Date.now() - unfinished.startedAt.getTime();
+    if (ageMs < STALE_RUN_THRESHOLD_MS) {
+      console.log(`Execução anterior (${unfinished.id}) ainda em andamento há ${(ageMs / 60000).toFixed(1)} min — pulando esta execução.`);
+      return;
+    }
+    await db.workerRun.update({
+      where: { id: unfinished.id },
+      data: { finishedAt: new Date(), status: "STALE", details: "Encerrada automaticamente: excedeu o tempo máximo esperado sem finalizar." },
+    });
+  }
+
   const run = await db.workerRun.create({ data: {} });
   let newEvents = 0; let errors = 0;
   const processes = await db.process.findMany({ where: { isActive: true }, orderBy: { updatedAt: "asc" } });
-  for (const process of processes) {
-    try {
-      const movements = await consultarProcesso(process.numeroCnj, process.tribunal);
-      const checkedAt = new Date();
-      if (!movements.length) { await db.process.update({ where: { id: process.id }, data: { status: "NOT_FOUND", lastCheckedAt: checkedAt, lastError: null } }); await wait(); continue; }
-      const latest = movements[movements.length - 1];
-      if (!process.lastEventAt) { await db.process.update({ where: { id: process.id }, data: { lastEventName: latest.nome, lastEventCode: latest.codigo, lastEventAt: new Date(latest.dataHora), lastCheckedAt: checkedAt, status: "OK", lastError: null } }); await wait(); continue; }
-      const newMovements = movements.filter((movement) => isNewerMovement(movement, process.lastEventAt!.toISOString()));
-      if (!newMovements.length) { await db.process.update({ where: { id: process.id }, data: { lastCheckedAt: checkedAt, status: "OK", lastError: null } }); await wait(); continue; }
-      await db.process.update({ where: { id: process.id }, data: { lastEventName: latest.nome, lastEventCode: latest.codigo, lastEventAt: new Date(latest.dataHora), lastCheckedAt: checkedAt, status: "NEW_EVENT", lastError: null } });
-      const connection = await db.telegramConnection.findUnique({ where: { userId: process.userId }, select: { chatId: true, notifyNovoAndamento: true, notifyPrazo: true } });
-      for (const movement of newMovements) {
-        const event = await db.processEvent.upsert({ where: { processId_happenedAt_name: { processId: process.id, happenedAt: new Date(movement.dataHora), name: movement.nome } }, create: { processId: process.id, userId: process.userId, code: movement.codigo, name: movement.nome, happenedAt: new Date(movement.dataHora), metadata: { complementos: movement.complementosTabelados ?? [] } }, update: {} });
-        newEvents++;
-        const processRef = { numero_cnj: process.numeroCnj, tribunal: process.tribunal, advogado: process.advogado };
-        if (connection?.chatId && connection.notifyNovoAndamento && !event.notifiedAt) {
-          await sendTelegramMessage(connection.chatId, movementMessage(processRef, movement));
-          await db.processEvent.update({ where: { id: event.id }, data: { notifiedAt: new Date() } });
+  try {
+    for (const process of processes) {
+      try {
+        const movements = await consultarProcesso(process.numeroCnj, process.tribunal);
+        const checkedAt = new Date();
+        if (!movements.length) { await db.process.update({ where: { id: process.id }, data: { status: "NOT_FOUND", lastCheckedAt: checkedAt, lastError: null } }); await wait(); continue; }
+        const latest = movements[movements.length - 1];
+        if (!process.lastEventAt) { await db.process.update({ where: { id: process.id }, data: { lastEventName: latest.nome, lastEventCode: latest.codigo, lastEventAt: new Date(latest.dataHora), lastCheckedAt: checkedAt, status: "OK", lastError: null } }); await wait(); continue; }
+        const newMovements = movements.filter((movement) => isNewerMovement(movement, process.lastEventAt!.toISOString()));
+        if (!newMovements.length) { await db.process.update({ where: { id: process.id }, data: { lastCheckedAt: checkedAt, status: "OK", lastError: null } }); await wait(); continue; }
+        await db.process.update({ where: { id: process.id }, data: { lastEventName: latest.nome, lastEventCode: latest.codigo, lastEventAt: new Date(latest.dataHora), lastCheckedAt: checkedAt, status: "NEW_EVENT", lastError: null } });
+        const connection = await db.telegramConnection.findUnique({ where: { userId: process.userId }, select: { chatId: true, notifyNovoAndamento: true, notifyPrazo: true } });
+        for (const movement of newMovements) {
+          const event = await db.processEvent.upsert({ where: { processId_happenedAt_name: { processId: process.id, happenedAt: new Date(movement.dataHora), name: movement.nome } }, create: { processId: process.id, userId: process.userId, code: movement.codigo, name: movement.nome, happenedAt: new Date(movement.dataHora), metadata: { complementos: movement.complementosTabelados ?? [] } }, update: {} });
+          newEvents++;
+          const processRef = { numero_cnj: process.numeroCnj, tribunal: process.tribunal, advogado: process.advogado };
+          if (connection?.chatId && connection.notifyNovoAndamento && !event.notifiedAt) {
+            await sendTelegramMessage(connection.chatId, movementMessage(processRef, movement));
+            await db.processEvent.update({ where: { id: event.id }, data: { notifiedAt: new Date() } });
+          }
+          if (connection?.chatId && connection.notifyPrazo && !event.prazoNotifiedAt && matchesPrazoKeyword(movement.nome)) {
+            await sendTelegramMessage(connection.chatId, prazoMessage(processRef, movement));
+            await db.processEvent.update({ where: { id: event.id }, data: { prazoNotifiedAt: new Date() } });
+          }
         }
-        if (connection?.chatId && connection.notifyPrazo && !event.prazoNotifiedAt && matchesPrazoKeyword(movement.nome)) {
-          await sendTelegramMessage(connection.chatId, prazoMessage(processRef, movement));
-          await db.processEvent.update({ where: { id: event.id }, data: { prazoNotifiedAt: new Date() } });
-        }
-      }
-    } catch (err) { errors++; await db.process.update({ where: { id: process.id }, data: { status: "ERROR", lastCheckedAt: new Date(), lastError: err instanceof Error ? err.message.slice(0, 1000) : "Erro desconhecido" } }); }
-    await wait();
+      } catch (err) { errors++; await db.process.update({ where: { id: process.id }, data: { status: "ERROR", lastCheckedAt: new Date(), lastError: err instanceof Error ? err.message.slice(0, 1000) : "Erro desconhecido" } }); }
+      await wait();
+    }
+    await db.workerRun.update({ where: { id: run.id }, data: { finishedAt: new Date(), totalProcesses: processes.length, newEvents, errors, status: errors ? "COMPLETED_WITH_ERRORS" : "COMPLETED" } });
+    console.log(`Concluído: ${newEvents} novo(s) andamento(s), ${errors} erro(s).`);
+  } catch (error) {
+    // Falha fatal (fora do try por-processo, ex.: conexão com o banco caiu) — fecha o
+    // WorkerRun como FAILED em vez de deixá-lo órfão até o timeout de stale run.
+    await db.workerRun
+      .update({ where: { id: run.id }, data: { finishedAt: new Date(), totalProcesses: processes.length, newEvents, errors, status: "FAILED", details: error instanceof Error ? error.message.slice(0, 1000) : "Erro desconhecido" } })
+      .catch(() => {});
+    throw error;
   }
-  await db.workerRun.update({ where: { id: run.id }, data: { finishedAt: new Date(), totalProcesses: processes.length, newEvents, errors, status: errors ? "COMPLETED_WITH_ERRORS" : "COMPLETED" } });
-  console.log(`Concluído: ${newEvents} novo(s) andamento(s), ${errors} erro(s).`);
 }
 main().catch((error) => { console.error(error); process.exit(1); }).finally(() => db.$disconnect());

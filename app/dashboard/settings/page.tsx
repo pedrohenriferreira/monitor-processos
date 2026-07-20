@@ -7,6 +7,7 @@ const PROCESS_SELECT = {
   id: true,
   numeroCnj: true,
   tribunal: true,
+  createdAt: true,
   advogado: true,
   classe: true,
   parteAdversa: true,
@@ -42,6 +43,7 @@ export default async function SettingsPage() {
     happenedAt: event.happenedAt.toISOString(),
     process: {
       ...event.process,
+      createdAt: event.process.createdAt.toISOString(),
       valorCausa: event.process.valorCausa ? Number(event.process.valorCausa) : null,
       lastEventAt: event.process.lastEventAt?.toISOString() ?? null,
       lastCheckedAt: event.process.lastCheckedAt?.toISOString() ?? null,

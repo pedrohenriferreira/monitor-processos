@@ -5,18 +5,20 @@ import {
   type ColumnDef,
   type ColumnFiltersState,
   type ColumnOrderState,
+  type ExpandedState,
   type PaginationState,
   type RowSelectionState,
   type SortingState,
   type VisibilityState,
   flexRender,
   getCoreRowModel,
+  getExpandedRowModel,
   getFilteredRowModel,
   getPaginationRowModel,
   getSortedRowModel,
   useReactTable,
 } from "@tanstack/react-table";
-import { ArrowDown, ArrowUp, Download, FileUp, GripVertical } from "lucide-react";
+import { ArrowDown, ArrowUp, ChevronRight, Download, FileUp, GripVertical } from "lucide-react";
 import { toast } from "sonner";
 import { Badge, STATUS_BADGE } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -34,6 +36,30 @@ const PAGE_SIZE_OPTIONS = [10, 30, 50, 100];
 
 type FilterField = { type: FilterFieldType; displayName: string; getRaw: (p: ProcessRow) => unknown; options?: { label: string; value: string }[] };
 
+// Mesmo número CNJ pode aparecer em mais de um tribunal quando o processo sobe de instância
+// (ex.: tjsp -> stj) — é o mesmo processo, não uma duplicata. Agrupamos por numeroCnj e
+// mostramos a instância mais antiga como linha principal, com as demais como "filhas" expansíveis.
+type ProcessGroupRow = ProcessRow & { subRows?: ProcessRow[] };
+
+function groupByProcesso(processes: ProcessRow[]): ProcessGroupRow[] {
+  const byNumero = new Map<string, ProcessRow[]>();
+  for (const p of processes) {
+    const list = byNumero.get(p.numeroCnj);
+    if (list) list.push(p);
+    else byNumero.set(p.numeroCnj, [p]);
+  }
+  const groups: ProcessGroupRow[] = [];
+  for (const list of byNumero.values()) {
+    if (list.length === 1) {
+      groups.push(list[0]);
+      continue;
+    }
+    const [primary, ...rest] = [...list].sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+    groups.push({ ...primary, subRows: rest });
+  }
+  return groups;
+}
+
 export default function Content({ processes: initial, userId }: { processes: ProcessRow[]; userId: string }) {
   const [processes, setProcesses] = useState(initial);
   const [sorting, setSorting] = useState<SortingState>([]);
@@ -50,6 +76,9 @@ export default function Content({ processes: initial, userId }: { processes: Pro
   const [draggedColumnId, setDraggedColumnId] = useState<string | null>(null);
   const [pagination, setPagination] = useState<PaginationState>({ pageIndex: 0, pageSize: DEFAULT_PAGE_SIZE });
   const [detailRow, setDetailRow] = useState<ProcessRow | null>(null);
+  const [expanded, setExpanded] = useState<ExpandedState>({});
+
+  const groupedProcesses = useMemo(() => groupByProcesso(processes), [processes]);
 
   // Column order is a per-device UI preference — persists across logout/reload/close since it
   // lives in localStorage, not the session. Loaded after mount to avoid an SSR/client mismatch.
@@ -108,15 +137,15 @@ export default function Content({ processes: initial, userId }: { processes: Pro
   );
 
   const makeFilterFn = useCallback(
-    (id: string) => (row: { original: ProcessRow }, _columnId: string, filterValue: FilterModel) => {
+    (id: string) => (row: { original: ProcessGroupRow }, _columnId: string, filterValue: FilterModel) => {
       const field = filterFields[id];
       return applyFilter(field.type, field.getRaw(row.original), filterValue);
     },
     [filterFields]
   );
 
-  const columns = useMemo<ColumnDef<ProcessRow>[]>(() => {
-    const cols: ColumnDef<ProcessRow>[] = [
+  const columns = useMemo<ColumnDef<ProcessGroupRow>[]>(() => {
+    const cols: ColumnDef<ProcessGroupRow>[] = [
       {
         id: "select",
         header: ({ table }) => (
@@ -132,7 +161,25 @@ export default function Content({ processes: initial, userId }: { processes: Pro
       {
         accessorKey: "numeroCnj",
         header: "Número",
-        cell: ({ row }) => <span className="font-mono text-xs">{row.original.numeroCnj}</span>,
+        cell: ({ row }) => (
+          <span className="flex items-center gap-1.5" style={{ paddingLeft: row.depth * 20 }}>
+            {row.depth > 0 && <span className="text-zinc-300">└</span>}
+            {row.getCanExpand() && (
+              <button
+                className="flex h-4 w-4 shrink-0 items-center justify-center text-zinc-500 hover:text-zinc-800"
+                onClick={(e) => { e.stopPropagation(); row.getToggleExpandedHandler()(); }}
+              >
+                <ChevronRight size={13} className={cn("transition-transform", row.getIsExpanded() && "rotate-90")} />
+              </button>
+            )}
+            <span className={cn("font-mono text-xs", row.depth > 0 && "text-zinc-400")}>{row.original.numeroCnj}</span>
+            {row.getCanExpand() && !row.getIsExpanded() && (
+              <span className="rounded-full border border-zinc-200 bg-zinc-50 px-1.5 py-0.5 text-[10.5px] font-medium text-zinc-500">
+                +{row.subRows.length} instância{row.subRows.length > 1 ? "s" : ""}
+              </span>
+            )}
+          </span>
+        ),
         filterFn: makeFilterFn("numeroCnj"),
         meta: filterFields.numeroCnj,
       },
@@ -209,9 +256,9 @@ export default function Content({ processes: initial, userId }: { processes: Pro
   );
 
   const table = useReactTable({
-    data: processes,
+    data: groupedProcesses,
     columns,
-    state: { sorting, columnFilters, rowSelection, columnVisibility, columnOrder, pagination },
+    state: { sorting, columnFilters, rowSelection, columnVisibility, columnOrder, pagination, expanded },
     initialState: { columnPinning: { left: ["select", "numeroCnj"], right: ["actions"] } },
     onSortingChange: setSorting,
     onColumnFiltersChange: setColumnFilters,
@@ -219,11 +266,15 @@ export default function Content({ processes: initial, userId }: { processes: Pro
     onColumnVisibilityChange: setColumnVisibility,
     onColumnOrderChange: setColumnOrder,
     onPaginationChange: setPagination,
+    onExpandedChange: setExpanded,
     getRowId: (row) => row.id,
+    getSubRows: (row) => row.subRows,
     getCoreRowModel: getCoreRowModel(),
     getFilteredRowModel: getFilteredRowModel(),
     getSortedRowModel: getSortedRowModel(),
     getPaginationRowModel: getPaginationRowModel(),
+    getExpandedRowModel: getExpandedRowModel(),
+    filterFromLeafRows: true,
   });
 
   const centerIds = table.getCenterLeafColumns().map((c) => c.id);
@@ -248,7 +299,7 @@ export default function Content({ processes: initial, userId }: { processes: Pro
       <div className="mb-4 flex flex-wrap items-start justify-between gap-4">
         <div>
           <h1 className="text-[22px] font-semibold">Processos Monitorados</h1>
-          <p className="text-[13px] text-zinc-500">{processes.length} processos • atualizado automaticamente</p>
+          <p className="text-[13px] text-zinc-500">{groupedProcesses.length} processos • atualizado automaticamente</p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <FilterBar table={table} filterableIds={filterableIds} />
@@ -312,7 +363,11 @@ export default function Content({ processes: initial, userId }: { processes: Pro
         <TableBody>
           {table.getRowModel().rows.length ? (
             table.getRowModel().rows.map((row) => (
-              <TableRow key={row.id} className="cursor-pointer hover:bg-zinc-50" onClick={() => setDetailRow(row.original)}>
+              <TableRow
+                key={row.id}
+                className={cn("cursor-pointer hover:bg-zinc-50", row.depth > 0 && "bg-zinc-50/60")}
+                onClick={() => (row.getCanExpand() ? row.getToggleExpandedHandler()() : setDetailRow(row.original))}
+              >
                 {row.getVisibleCells().map((cell) => (
                   <TableCell key={cell.id}>{flexRender(cell.column.columnDef.cell, cell.getContext())}</TableCell>
                 ))}
@@ -331,7 +386,7 @@ export default function Content({ processes: initial, userId }: { processes: Pro
       <div className="mt-3.5 flex flex-wrap items-center justify-between gap-3 text-[13px] text-zinc-500">
         <div className="flex flex-wrap items-center gap-4">
           <span>
-            Mostrando {table.getRowModel().rows.length} de {totalRows} processos
+            Mostrando {table.getRowModel().rows.filter((row) => row.depth === 0).length} de {totalRows} processos
           </span>
           <label className="flex items-center gap-1.5">
             <span>Itens por página</span>

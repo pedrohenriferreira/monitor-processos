@@ -2,6 +2,7 @@ export type ProcessRow = {
   id: string;
   numeroCnj: string;
   tribunal: string;
+  createdAt: string;
   advogado: string | null;
   classe: string | null;
   parteAdversa: string | null;

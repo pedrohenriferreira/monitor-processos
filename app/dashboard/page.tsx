@@ -11,6 +11,7 @@ export default async function DashboardPage() {
           id: true,
           numeroCnj: true,
           tribunal: true,
+          createdAt: true,
           advogado: true,
           classe: true,
           parteAdversa: true,
@@ -30,6 +31,7 @@ export default async function DashboardPage() {
       userId={user?.id ?? ""}
       processes={processes.map((p) => ({
         ...p,
+        createdAt: p.createdAt.toISOString(),
         valorCausa: p.valorCausa ? Number(p.valorCausa) : null,
         lastEventAt: p.lastEventAt?.toISOString() ?? null,
         lastCheckedAt: p.lastCheckedAt?.toISOString() ?? null,
